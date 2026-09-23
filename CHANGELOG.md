@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Rewrote the README: a feature list, requirements, how "Run now" works, the current rules for which providers the model picker lists, a troubleshooting section (including "The requested model is not supported"), and links to the cheat sheet, changelog, and license.
+
 ## [0.1.0] - 2026-09-23
 
 ### Added
