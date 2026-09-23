@@ -1,7 +1,7 @@
 {
   "name": "hermes-cron-gui",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
   "type": "module",
   "description": "Local GUI for creating, editing, and routing Hermes Agent cron jobs",
   "scripts": {
