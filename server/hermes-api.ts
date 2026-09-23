@@ -4,14 +4,16 @@
 // Every change goes through the `hermes cron` CLI so Hermes's own validation and
 // file locking apply; this app never writes to ~/.hermes itself.
 
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
+import { closeSync, openSync } from 'node:fs'
 import { open, readFile, readdir, stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { Connect, Plugin } from 'vite'
 import type {
-  AppSettings, Channel, CommandResult, JobInput, JobsResponse, MetaResponse, OutputFile, RewriteRequest, Run,
+  AppSettings, Channel, CommandResult, Job, JobInput, JobsResponse, MetaResponse, OutputFile, RewriteRequest, Run,
 } from '../src/types.ts'
 import { HERMES_HOME, listModelGroups, readDefaultModel } from './hermes-config.ts'
 import { RewriteError, rewriteModels, rewritePrompt, settingsResponse, writeSettings } from './rewrite.ts'
@@ -46,6 +48,55 @@ function hermes(args: string[]): Promise<CommandResult> {
       resolve({ ok: !err, output: output || (err ? String(err.message) : '') })
     })
   })
+}
+
+/**
+ * `hermes cron run` executes the job synchronously inside the CLI process, which can take many
+ * minutes on a large local model. Start it detached so neither an HTTP timeout nor stopping this
+ * server can kill it mid-run. If it exits within a few seconds (e.g. "already being fired"),
+ * report its output; otherwise report that it started and let the Runs tab show progress.
+ */
+async function startRun(id: string): Promise<CommandResult> {
+  const logPath = path.join(os.tmpdir(), `hermes-cron-gui-run-${id}.log`)
+  const fd = openSync(logPath, 'w')
+  const child = spawn(HERMES_BIN, ['cron', 'run', '--', id], {
+    detached: true,
+    stdio: ['ignore', fd, fd], // a file, not a pipe: pipes would break if this server stops
+    env: { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
+  })
+  closeSync(fd)
+  child.unref()
+  const exit = await new Promise<number | null | Error>((resolve) => {
+    const timer = setTimeout(() => resolve(null), 3000)
+    child.once('exit', (code) => { clearTimeout(timer); resolve(code ?? 1) })
+    child.once('error', (err) => { clearTimeout(timer); resolve(err) })
+  })
+  if (exit instanceof Error) return { ok: false, output: exit.message }
+  if (exit === null) {
+    return { ok: true, output: 'Run started. It continues in the background; the Runs tab updates as it progresses.' }
+  }
+  const output = (await readFile(logPath, 'utf8').catch(() => '')).trim()
+  return { ok: exit === 0, output: output || `hermes cron run exited with code ${exit}` }
+}
+
+// Mirrors Hermes's _claim_is_live (cron/jobs.py): a claim counts only while younger than the TTL
+// and while its owner process (host:pid:token) still exists on this machine.
+const FIRE_CLAIM_TTL_MS = 300_000
+
+function claimIsLive(claim: unknown): boolean {
+  const c = claim as { at?: string; by?: string } | null
+  if (!c?.at) return false
+  const age = Date.now() - Date.parse(c.at)
+  if (!(age >= 0 && age < FIRE_CLAIM_TTL_MS)) return false
+  const [host, pid] = String(c.by ?? '').split(':')
+  if (host === os.hostname() && /^\d+$/.test(pid ?? '')) {
+    try {
+      process.kill(Number(pid), 0) // signal 0: existence check only
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ESRCH') return false
+    }
+  }
+  return true
 }
 
 // `--flag=value` keeps argparse from reading values that start with "-" as flags.
@@ -107,7 +158,8 @@ async function readJobs(): Promise<JobsResponse> {
     const beat = Number(await readFile(path.join(CRON_DIR, 'ticker_heartbeat'), 'utf8'))
     if (Number.isFinite(beat)) heartbeatAgeSec = Math.max(0, Math.round(Date.now() / 1000 - beat))
   } catch { /* scheduler never ran */ }
-  return { jobs: raw.jobs ?? [], updatedAt: raw.updated_at ?? null, heartbeatAgeSec }
+  const jobs = (raw.jobs ?? []).map((j: Job) => ({ ...j, running: claimIsLive(j.fire_claim) }))
+  return { jobs, updatedAt: raw.updated_at ?? null, heartbeatAgeSec }
 }
 
 async function readMeta(): Promise<MetaResponse> {
@@ -292,7 +344,8 @@ async function route(req: IncomingMessage, res: ServerResponse) {
       if (method === 'PATCH') return send(res, 200, await hermes(editArgs(id, await readBody(req))))
       if (method === 'DELETE') return send(res, 200, await hermes(['remove', '--', id]))
     }
-    if (method === 'POST' && (sub === 'pause' || sub === 'resume' || sub === 'run')) {
+    if (method === 'POST' && sub === 'run') return send(res, 200, await startRun(id))
+    if (method === 'POST' && (sub === 'pause' || sub === 'resume')) {
       return send(res, 200, await hermes([sub, '--', id]))
     }
     if (method === 'GET' && sub === 'runs') {

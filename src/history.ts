@@ -1,5 +1,5 @@
 import { api } from './api.ts'
-import type { Run } from './types.ts'
+import type { OutputFile, Run } from './types.ts'
 import { $, esc, fmtBytes, fmtDate } from './util.ts'
 
 const STATUS_CLASS: Record<string, string> = {
@@ -17,12 +17,26 @@ function duration(r: Run): string {
   return s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`
 }
 
-export async function renderRuns(root: HTMLElement, jobId: string) {
-  root.innerHTML = '<p class="text-sm text-stone-500">Loading…</p>'
+// What each tab last rendered, so a background refresh only touches the DOM when data changed.
+let runsKey = ''
+let outputsKey = ''
+
+const ACTIVE = new Set(['claimed', 'running'])
+
+/**
+ * Render the Runs tab. With `refresh: true` (background poll) nothing is re-rendered unless the
+ * data changed. Returns whether any run is still in progress, so the caller can poll faster.
+ */
+export async function renderRuns(root: HTMLElement, jobId: string, { refresh = false } = {}): Promise<boolean> {
+  if (!refresh) root.innerHTML = '<p class="text-sm text-stone-500">Loading…</p>'
   const runs = await api.runs(jobId)
+  const active = runs.some((r) => ACTIVE.has(r.status))
+  const key = `${jobId}:${JSON.stringify(runs)}`
+  if (refresh && key === runsKey) return active
+  runsKey = key
   if (!runs.length) {
     root.innerHTML = '<p class="text-sm text-stone-500">No runs recorded yet.</p>'
-    return
+    return active
   }
   // A job can look healthy from manual runs yet never have completed a scheduled one.
   const scheduledOk = runs.some((r) => r.source === 'builtin' && r.status === 'completed')
@@ -57,6 +71,7 @@ export async function renderRuns(root: HTMLElement, jobId: string) {
         </tbody>
       </table>
     </div>`
+  return active
 }
 
 /** The agent's final answer, i.e. the text after the last "## Response" (or "## Error") heading. */
@@ -68,23 +83,39 @@ function extractResponse(md: string): string {
   return md
 }
 
-export async function renderOutputs(root: HTMLElement, jobId: string) {
-  root.innerHTML = '<p class="text-sm text-stone-500">Loading…</p>'
+function fileList(files: OutputFile[], selected: string): string {
+  return files.map((f) => `
+    <li><button type="button" data-file="${esc(f.name)}" aria-current="${f.name === selected}"
+      class="w-full rounded-md px-2.5 py-1.5 text-left hover:bg-stone-100 aria-[current=true]:bg-indigo-50 dark:hover:bg-stone-800 dark:aria-[current=true]:bg-indigo-950">
+      <span class="block font-mono text-xs">${esc(f.name.replace(/\.md$/, '').replace('_', ' '))}</span>
+      <span class="text-xs text-stone-500">${f.failed ? '<span class="text-red-600 dark:text-red-400">failed</span> · ' : ''}${fmtBytes(f.size)}</span>
+    </button></li>`).join('')
+}
+
+/**
+ * Render the Output tab. On a background refresh, only the file list is updated (when a new run
+ * saved output), keeping the file you're reading, its scroll position, and the view toggle.
+ */
+export async function renderOutputs(root: HTMLElement, jobId: string, { refresh = false } = {}) {
+  if (!refresh) root.innerHTML = '<p class="text-sm text-stone-500">Loading…</p>'
   const files = await api.outputs(jobId)
+  const key = `${jobId}:${JSON.stringify(files)}`
+  if (refresh && key === outputsKey) return
+  outputsKey = key
+
+  const list = root.querySelector<HTMLElement>('[data-files]')
+  if (refresh && list && files.length) {
+    const selected = list.querySelector<HTMLElement>('[aria-current="true"]')?.dataset.file ?? ''
+    list.innerHTML = fileList(files, selected)
+    return
+  }
   if (!files.length) {
     root.innerHTML = '<p class="text-sm text-stone-500">No saved output yet.</p>'
     return
   }
   root.innerHTML = `
     <div class="grid gap-4 lg:grid-cols-[14rem_1fr]">
-      <ul class="space-y-1 text-sm" data-files>
-        ${files.map((f, i) => `
-          <li><button type="button" data-file="${esc(f.name)}" aria-current="${i === 0}"
-            class="w-full rounded-md px-2.5 py-1.5 text-left hover:bg-stone-100 aria-[current=true]:bg-indigo-50 dark:hover:bg-stone-800 dark:aria-[current=true]:bg-indigo-950">
-            <span class="block font-mono text-xs">${esc(f.name.replace(/\.md$/, '').replace('_', ' '))}</span>
-            <span class="text-xs text-stone-500">${f.failed ? '<span class="text-red-600 dark:text-red-400">failed</span> · ' : ''}${fmtBytes(f.size)}</span>
-          </button></li>`).join('')}
-      </ul>
+      <ul class="space-y-1 text-sm" data-files>${fileList(files, files[0].name)}</ul>
       <div class="min-w-0">
         <label class="mb-2 flex items-center gap-2 text-sm">
           <input type="checkbox" data-response-only checked /> Final response only</label>

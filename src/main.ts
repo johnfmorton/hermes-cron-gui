@@ -9,6 +9,9 @@ import { $, deliverList, describeSchedule, esc, fmtDate, fmtRelative, jobWarning
 type Tab = 'settings' | 'runs' | 'output'
 const TABS: [Tab, string][] = [['settings', 'Settings'], ['runs', 'Runs'], ['output', 'Output']]
 const POLL_MS = 15_000
+// Faster checks while a run is queued or in progress, so status changes show up promptly.
+const FAST_POLL_MS = 5_000
+const FAST_AFTER_RUN_MS = 3 * 60_000 // "Run now" waits for the next scheduler tick, up to ~1 min
 
 const state = {
   jobs: [] as Job[],
@@ -19,6 +22,11 @@ const state = {
   selected: null as string | null,
   tab: 'settings' as Tab,
   dirty: false,
+  /** Poll fast until this time (set by "Run now"). */
+  fastUntil: 0,
+  /** Whether the open Runs tab shows a claimed/running execution. */
+  runsActive: false,
+  lastChecked: null as Date | null,
 }
 
 const listEl = $('#job-list')
@@ -38,7 +46,9 @@ function toast(message: string) {
 const currentJob = () => state.jobs.find((j) => j.id === state.selected) ?? null
 
 function stateBadge(job: Job): string {
-  const [label, cls] = !job.enabled || job.state === 'paused'
+  const [label, cls] = job.running
+    ? ['running', 'bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300']
+    : !job.enabled || job.state === 'paused'
     ? ['paused', 'bg-stone-200 text-stone-700 dark:bg-stone-800 dark:text-stone-300']
     : job.last_status && job.last_status !== 'ok'
       ? ['failing', 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300']
@@ -114,7 +124,7 @@ function detailHeader(job: Job): string {
           : `<span class="font-mono">${esc(state.meta?.defaultModel ?? 'default')}</span> (follows your default)`}</p>
       </div>
       <div class="ml-auto flex gap-2">
-        <button type="button" class="btn" data-action="run" title="Run on the next scheduler tick">Run now</button>
+        <button type="button" class="btn" data-action="run" title="Start a run now; it continues in the background">Run now</button>
         <button type="button" class="btn" data-action="${paused ? 'resume' : 'pause'}">${paused ? 'Resume' : 'Pause'}</button>
         <button type="button" class="btn btn-danger" data-action="delete">Delete</button>
       </div>
@@ -151,19 +161,41 @@ function renderDetail() {
   detailEl.innerHTML = `
     <div class="mx-auto max-w-4xl p-6">
       <div data-header>${detailHeader(job)}</div>
-      <nav class="mt-6 mb-6 flex gap-5 border-b border-stone-200 dark:border-stone-800" role="tablist">
-        ${TABS.map(([t, label]) => `
-          <a role="tab" class="tab" aria-selected="${t === state.tab}"
-            href="#/${esc(job.id)}${t === 'settings' ? '' : `/${t}`}">${label}</a>`).join('')}
-      </nav>
+      <div class="mt-6 mb-6 flex flex-wrap items-end gap-x-4 border-b border-stone-200 dark:border-stone-800">
+        <nav class="flex gap-5" role="tablist">
+          ${TABS.map(([t, label]) => `
+            <a role="tab" class="tab" aria-selected="${t === state.tab}"
+              href="#/${esc(job.id)}${t === 'settings' ? '' : `/${t}`}">${label}</a>`).join('')}
+        </nav>
+        <div class="ml-auto flex items-center gap-2 pb-2 text-xs text-stone-500">
+          <span data-checked aria-live="polite"></span>
+          <button type="button" data-action="refresh" class="rounded px-1.5 py-0.5 font-medium text-indigo-600 hover:bg-indigo-50 disabled:opacity-50 dark:text-indigo-400 dark:hover:bg-indigo-950">Refresh</button>
+        </div>
+      </div>
       <div data-body></div>
     </div>`
 
   const body = $('[data-body]', detailEl)
   const fail = (err: unknown) => { body.innerHTML = `<p class="error-box">${esc(err instanceof Error ? err.message : err)}</p>` }
   if (state.tab === 'settings') renderJobForm(body, job, state.meta, state.models, formCallbacks)
-  else if (state.tab === 'runs') renderRuns(body, job.id).catch(fail)
-  else renderOutputs(body, job.id).catch(fail)
+  else if (state.tab === 'runs') {
+    renderRuns(body, job.id).then((active) => { state.runsActive = active; schedulePoll() }).catch(fail)
+  } else renderOutputs(body, job.id).catch(fail)
+  renderChecked()
+}
+
+const pollInterval = () =>
+  Date.now() < state.fastUntil || state.runsActive || state.jobs.some((j) => j.running)
+    ? FAST_POLL_MS : POLL_MS
+
+function renderChecked() {
+  const el = detailEl.querySelector('[data-checked]')
+  if (!el) return
+  const fast = pollInterval() === FAST_POLL_MS
+  const every = `Auto-refreshes every ${pollInterval() / 1000}s${fast ? ' while a run is pending' : ''}`
+  el.textContent = state.lastChecked
+    ? `${every} · checked ${state.lastChecked.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`
+    : every
 }
 
 const formCallbacks = {
@@ -188,7 +220,13 @@ const formCallbacks = {
 
 // --- Data --------------------------------------------------------------------
 
-async function refresh() {
+// One refresh at a time: a manual click during a poll joins the poll instead of racing it.
+let refreshing: Promise<void> | null = null
+function refresh(): Promise<void> {
+  return (refreshing ??= doRefresh().finally(() => { refreshing = null }))
+}
+
+async function doRefresh() {
   const res = await api.jobs()
   state.jobs = res.jobs
   state.heartbeatAgeSec = res.heartbeatAgeSec
@@ -198,11 +236,23 @@ async function refresh() {
   const job = currentJob()
   const header = detailEl.querySelector('[data-header]')
   if (job && header) header.innerHTML = detailHeader(job)
+  // Keep an open Runs/Output tab current too. These only touch the DOM when something changed.
+  const body = detailEl.querySelector<HTMLElement>('[data-body]')
+  if (job && body && state.tab === 'runs') state.runsActive = await renderRuns(body, job.id, { refresh: true })
+  else if (job && body && state.tab === 'output') await renderOutputs(body, job.id, { refresh: true })
+  state.lastChecked = new Date()
+  renderChecked()
 }
 
 let deleteArmed = 0
 async function runAction(action: string, btn: HTMLButtonElement) {
   if (action === 'new') return navigate('new')
+  if (action === 'refresh') {
+    btn.disabled = true
+    await refresh().catch((err) => toast(err instanceof Error ? err.message : String(err)))
+    btn.disabled = false
+    return schedulePoll()
+  }
   const job = currentJob()
   if (!job) return
 
@@ -221,7 +271,9 @@ async function runAction(action: string, btn: HTMLButtonElement) {
       ? await api.remove(job.id)
       : await api.action(job.id, action as 'pause' | 'resume' | 'run')
     toast(res.output || (res.ok ? 'Done.' : 'Command failed.'))
+    if (action === 'run' && res.ok) state.fastUntil = Date.now() + FAST_AFTER_RUN_MS
     await refresh()
+    schedulePoll()
     if (action === 'delete' && res.ok) {
       state.dirty = false
       navigate(null)
@@ -264,7 +316,7 @@ let pollTimer = 0
 function schedulePoll() {
   clearTimeout(pollTimer)
   if (document.visibilityState === 'visible') {
-    pollTimer = window.setTimeout(() => refresh().catch(() => {}).finally(schedulePoll), POLL_MS)
+    pollTimer = window.setTimeout(() => refresh().catch(() => {}).finally(schedulePoll), pollInterval())
   }
 }
 document.addEventListener('visibilitychange', () => {

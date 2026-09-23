@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Runs and Output tabs refresh automatically along with the job list, redrawing only when something changed; the Output tab keeps the file you're reading and your scroll position.
+- A "last checked" line with a Refresh button beside the job tabs, showing how often the page checks.
+- Faster checks (every 5s instead of 15s) while a run is queued or in progress, and a "running" badge in the job list.
+
+### Fixed
+
+- "Run now" no longer kills runs that take longer than 60 seconds. `hermes cron run` executes the whole job synchronously, so it now starts as a detached background process that survives page navigation and dev-server restarts.
+- A run whose process died no longer shows as "running" forever; the badge follows Hermes's own rule (claim under 5 minutes old and owner process alive).
+- The "Run now" tooltip no longer says the run waits for the next scheduler tick.
+
 ## [0.0.1] - 2026-09-23
 
 ### Added

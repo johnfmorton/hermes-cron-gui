@@ -33,6 +33,10 @@ export interface Job {
   failure_deliver?: string | null
   origin: unknown
   workdir: string | null
+  /** Set by Hermes while a run is claimed/in progress, cleared when it finishes. */
+  fire_claim?: { at: string; by: string } | null
+  /** Added by the local API: fire_claim is live (fresh, and its owner process still exists). */
+  running?: boolean
 }
 
 export interface JobsResponse {
