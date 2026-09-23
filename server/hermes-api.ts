@@ -7,15 +7,15 @@
 import { execFile } from 'node:child_process'
 import { open, readFile, readdir, stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { Connect, Plugin } from 'vite'
 import type {
-  Channel, CommandResult, JobInput, JobsResponse, MetaResponse, OutputFile, Run,
+  AppSettings, Channel, CommandResult, JobInput, JobsResponse, MetaResponse, OutputFile, RewriteRequest, Run,
 } from '../src/types.ts'
+import { HERMES_HOME, listModelGroups, readDefaultModel } from './hermes-config.ts'
+import { RewriteError, rewriteModels, rewritePrompt, settingsResponse, writeSettings } from './rewrite.ts'
 
-const HERMES_HOME = process.env.HERMES_HOME ?? path.join(os.homedir(), '.hermes')
 const HERMES_BIN = process.env.HERMES_BIN ?? 'hermes'
 const CRON_DIR = path.join(HERMES_HOME, 'cron')
 
@@ -138,21 +138,58 @@ async function readMeta(): Promise<MetaResponse> {
   } catch { /* no skills dir */ }
   skills.sort()
 
-  return { hermesHome: HERMES_HOME, platforms: PLATFORMS, channels, skills }
+  return { hermesHome: HERMES_HOME, platforms: PLATFORMS, channels, skills, defaultModel: await readDefaultModel() }
 }
 
-function readRuns(jobId: string, limit: number): Run[] {
+interface AuditEntry { ts: number; model: string | null; silent: boolean; tokens: number | null }
+
+/**
+ * usage_audit.jsonl records, per agent run, the model that actually ran and whether the reply was
+ * [SILENT]. It shares no id with executions.db, but each entry is written as the run finishes.
+ */
+async function readAudit(jobId: string): Promise<AuditEntry[]> {
+  let text: string
+  try { text = await readFile(path.join(CRON_DIR, 'usage_audit.jsonl'), 'utf8') } catch { return [] }
+  const entries: AuditEntry[] = []
+  for (const line of text.split('\n')) {
+    if (!line.includes(jobId)) continue // cheap prefilter before JSON.parse
+    try {
+      const d = JSON.parse(line)
+      if (d.job_id !== jobId) continue
+      entries.push({ ts: Date.parse(d.ts), model: d.model ?? null, silent: Boolean(d.response_silent), tokens: d.total_tokens ?? null })
+    } catch { /* partial line */ }
+  }
+  return entries
+}
+
+const AUDIT_MATCH_MS = 60_000
+
+async function readRuns(jobId: string, limit: number): Promise<Run[]> {
   const dbPath = path.join(CRON_DIR, 'executions.db')
   let db: DatabaseSync
   try { db = new DatabaseSync(dbPath, { readOnly: true }) } catch { return [] }
+  let runs: Run[]
   try {
-    return db.prepare(
+    runs = db.prepare(
       `SELECT id, job_id, source, status, claimed_at, started_at, finished_at, error, delivery_outcome
        FROM executions WHERE job_id = ? ORDER BY claimed_at DESC LIMIT ?`,
     ).all(jobId, limit) as unknown as Run[]
   } finally {
     db.close()
   }
+  const audit = await readAudit(jobId)
+  for (const run of runs) {
+    const end = run.finished_at ? Date.parse(run.finished_at) : NaN
+    let best: AuditEntry | null = null
+    for (const a of audit) {
+      const gap = Math.abs(a.ts - end)
+      if (gap <= AUDIT_MATCH_MS && (!best || gap < Math.abs(best.ts - end))) best = a
+    }
+    run.model = best?.model ?? null
+    run.silent = best ? best.silent : null
+    run.tokens = best?.tokens ?? null
+  }
+  return runs
 }
 
 async function listOutputs(jobId: string): Promise<OutputFile[]> {
@@ -198,7 +235,7 @@ function isTrusted(req: IncomingMessage): boolean {
   return true
 }
 
-async function readBody(req: IncomingMessage): Promise<JobInput> {
+async function readBody<T = JobInput>(req: IncomingMessage): Promise<T> {
   if (!req.headers['content-type']?.startsWith('application/json')) {
     throw new HttpError(415, 'Expected application/json')
   }
@@ -207,7 +244,7 @@ async function readBody(req: IncomingMessage): Promise<JobInput> {
     data += chunk
     if (data.length > 1_000_000) throw new HttpError(413, 'Body too large')
   }
-  return data ? JSON.parse(data) : {}
+  return (data ? JSON.parse(data) : {}) as T
 }
 
 function send(res: ServerResponse, status: number, body: unknown) {
@@ -228,6 +265,26 @@ async function route(req: IncomingMessage, res: ServerResponse) {
     if (method === 'POST') return send(res, 200, await hermes(createArgs(await readBody(req))))
   }
   if (resource === 'meta' && method === 'GET') return send(res, 200, await readMeta())
+  if (resource === 'models' && method === 'GET') return send(res, 200, await listModelGroups())
+
+  if (resource === 'settings') {
+    if (method === 'GET') return send(res, 200, await settingsResponse())
+    if (method === 'PUT') {
+      await writeSettings(await readBody<AppSettings>(req))
+      return send(res, 200, await settingsResponse())
+    }
+  }
+  if (resource === 'rewrite') {
+    if (method === 'GET' && id === 'models') {
+      return send(res, 200, await rewriteModels(url.searchParams.get('backend') ?? ''))
+    }
+    if (method === 'POST' && !id) {
+      // Stop the upstream LLM call if the user discards the rewrite (the browser aborts the fetch).
+      const abort = new AbortController()
+      res.on('close', () => { if (!res.writableFinished) abort.abort() })
+      return send(res, 200, await rewritePrompt(await readBody<RewriteRequest>(req), abort.signal))
+    }
+  }
 
   if (resource === 'jobs' && id) {
     if (!JOB_ID.test(id)) throw new HttpError(400, 'Bad job id')
@@ -240,7 +297,7 @@ async function route(req: IncomingMessage, res: ServerResponse) {
     }
     if (method === 'GET' && sub === 'runs') {
       const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 50))
-      return send(res, 200, readRuns(id, limit))
+      return send(res, 200, await readRuns(id, limit))
     }
     if (method === 'GET' && sub === 'outputs') {
       if (!file) return send(res, 200, await listOutputs(id))
@@ -256,7 +313,8 @@ const middleware: Connect.NextHandleFunction = (req, res) => {
   if (!isTrusted(req)) return send(res, 403, { error: 'Forbidden' })
   route(req, res).catch((err: unknown) => {
     const status = err instanceof HttpError ? err.status
-      : (err as NodeJS.ErrnoException)?.code === 'ENOENT' ? 404 : 500
+      : err instanceof RewriteError ? 400
+        : (err as NodeJS.ErrnoException)?.code === 'ENOENT' ? 404 : 500
     send(res, status, { error: err instanceof Error ? err.message : String(err) })
   })
 }

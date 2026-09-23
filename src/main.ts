@@ -2,7 +2,8 @@ import './style.css'
 import { api } from './api.ts'
 import { renderOutputs, renderRuns } from './history.ts'
 import { renderJobForm } from './job-form.ts'
-import type { Job, MetaResponse } from './types.ts'
+import { renderSettings } from './settings-view.ts'
+import type { Job, MetaResponse, ModelGroup } from './types.ts'
 import { $, deliverList, describeSchedule, esc, fmtDate, fmtRelative, jobWarnings } from './util.ts'
 
 type Tab = 'settings' | 'runs' | 'output'
@@ -12,8 +13,9 @@ const POLL_MS = 15_000
 const state = {
   jobs: [] as Job[],
   meta: null as MetaResponse | null,
+  models: [] as ModelGroup[],
   heartbeatAgeSec: null as number | null,
-  /** Selected job id, 'new', or null. Mirrored in the URL hash: #/<id>/<tab> */
+  /** Selected job id, 'new', 'settings', or null. Mirrored in the URL hash: #/<id>/<tab> */
   selected: null as string | null,
   tab: 'settings' as Tab,
   dirty: false,
@@ -107,6 +109,9 @@ function detailHeader(job: Job): string {
         </p>
         <p class="mt-0.5 text-sm text-stone-500">Last run: ${esc(fmtDate(job.last_run_at))}${
           job.last_status ? ` (${esc(job.last_status)})` : ''} · ${job.repeat.completed} completed</p>
+        <p class="mt-0.5 text-sm text-stone-500">Model: ${job.model
+          ? `<span class="font-mono">${esc(job.model)}</span> (pinned)`
+          : `<span class="font-mono">${esc(state.meta?.defaultModel ?? 'default')}</span> (follows your default)`}</p>
       </div>
       <div class="ml-auto flex gap-2">
         <button type="button" class="btn" data-action="run" title="Run on the next scheduler tick">Run now</button>
@@ -118,13 +123,19 @@ function detailHeader(job: Job): string {
 
 function renderDetail() {
   if (!state.meta) return
+  if (state.selected === 'settings') {
+    renderSettings(detailEl, toast).catch((err) => {
+      detailEl.innerHTML = `<div class="p-6"><p class="error-box">${esc(err instanceof Error ? err.message : err)}</p></div>`
+    })
+    return
+  }
   if (state.selected === 'new') {
     detailEl.innerHTML = `
       <div class="mx-auto max-w-3xl p-6">
         <h2 class="mb-6 text-xl font-semibold tracking-tight">New job</h2>
         <div data-body></div>
       </div>`
-    renderJobForm($('[data-body]', detailEl), null, state.meta, formCallbacks)
+    renderJobForm($('[data-body]', detailEl), null, state.meta, state.models, formCallbacks)
     return
   }
 
@@ -150,7 +161,7 @@ function renderDetail() {
 
   const body = $('[data-body]', detailEl)
   const fail = (err: unknown) => { body.innerHTML = `<p class="error-box">${esc(err instanceof Error ? err.message : err)}</p>` }
-  if (state.tab === 'settings') renderJobForm(body, job, state.meta, formCallbacks)
+  if (state.tab === 'settings') renderJobForm(body, job, state.meta, state.models, formCallbacks)
   else if (state.tab === 'runs') renderRuns(body, job.id).catch(fail)
   else renderOutputs(body, job.id).catch(fail)
 }
@@ -264,8 +275,10 @@ document.addEventListener('visibilitychange', () => {
 async function init() {
   readHash()
   try {
-    const [meta] = await Promise.all([api.meta(), refresh()])
+    // The model list is non-essential: if a provider lookup fails, the picker falls back to "Custom…".
+    const [meta, models] = await Promise.all([api.meta(), api.models().catch(() => []), refresh()])
     state.meta = meta
+    state.models = models
     renderDetail()
     schedulePoll()
   } catch (err) {

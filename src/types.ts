@@ -54,6 +54,8 @@ export interface MetaResponse {
   platforms: string[]
   channels: Channel[]
   skills: string[]
+  /** Model an unpinned job runs on (cron.model, else model.default). */
+  defaultModel: string | null
 }
 
 export interface Run {
@@ -66,6 +68,10 @@ export interface Run {
   finished_at: string | null
   error: string | null
   delivery_outcome: string | null
+  /** From usage_audit.jsonl when a matching entry exists; null otherwise. */
+  model?: string | null
+  silent?: boolean | null
+  tokens?: number | null
 }
 
 export interface OutputFile {
@@ -98,4 +104,42 @@ export interface JobInput {
 export interface CommandResult {
   ok: boolean
   output: string
+}
+
+/** Models a job can be pinned to, grouped by the provider id Hermes expects. */
+export interface ModelGroup {
+  provider: string
+  label: string
+  models: { id: string; label: string }[]
+}
+
+export type RewriteBackend = 'ollama' | 'anthropic'
+
+export interface AppSettings {
+  rewrite: { backend: RewriteBackend; model: string }
+}
+
+export interface SettingsResponse {
+  settings: AppSettings
+  /** Whether ANTHROPIC_API_KEY is set in the project .env (the value never leaves the server). */
+  anthropicKeyPresent: boolean
+  envFile: string
+  ollamaUrl: string | null
+}
+
+export interface RewriteRequest {
+  prompt: string
+  name?: string
+  schedule?: string
+  deliver?: string
+  continuity?: boolean
+  model?: string
+}
+
+export interface RewriteResult {
+  prompt: string
+  notes: string[]
+  backend: RewriteBackend
+  model: string
+  ms: number
 }

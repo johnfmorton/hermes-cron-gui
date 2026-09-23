@@ -1,8 +1,12 @@
-import type { CommandResult, JobInput, JobsResponse, MetaResponse, OutputFile, Run } from './types.ts'
+import type {
+  AppSettings, CommandResult, JobInput, JobsResponse, MetaResponse, ModelGroup, OutputFile, RewriteRequest,
+  RewriteResult, Run, SettingsResponse,
+} from './types.ts'
 
-async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, url: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`/api${url}`, {
     method,
+    signal,
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
@@ -27,4 +31,10 @@ export const api = {
   outputs: (id: string) => request<OutputFile[]>('GET', `${job(id)}/outputs`),
   output: (id: string, name: string) =>
     request<string>('GET', `${job(id)}/outputs/${encodeURIComponent(name)}`),
+  models: () => request<ModelGroup[]>('GET', '/models'),
+  settings: () => request<SettingsResponse>('GET', '/settings'),
+  saveSettings: (s: AppSettings) => request<SettingsResponse>('PUT', '/settings', s),
+  rewriteModels: (backend: string) =>
+    request<string[]>('GET', `/rewrite/models?backend=${encodeURIComponent(backend)}`),
+  rewrite: (req: RewriteRequest, signal?: AbortSignal) => request<RewriteResult>('POST', '/rewrite', req, signal),
 }

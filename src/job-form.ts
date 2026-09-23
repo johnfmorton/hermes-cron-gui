@@ -1,6 +1,6 @@
 import { api } from './api.ts'
 import { TokenField, type TokenGroup } from './token-field.ts'
-import type { Job, JobInput, MetaResponse } from './types.ts'
+import type { Job, JobInput, MetaResponse, ModelGroup, RewriteResult } from './types.ts'
 import { $, deliverList, describeSchedule, esc, jobWarnings } from './util.ts'
 
 const SCHEDULE_PRESETS: [string, string][] = [
@@ -70,8 +70,13 @@ export interface FormCallbacks {
   onDirty: (dirty: boolean) => void
 }
 
-export function renderJobForm(root: HTMLElement, job: Job | null, meta: MetaResponse, cb: FormCallbacks) {
+export function renderJobForm(
+  root: HTMLElement, job: Job | null, meta: MetaResponse, modelGroups: ModelGroup[], cb: FormCallbacks,
+) {
   const init = initialValues(job)
+  // Flattened so each <option> value is just an index into this list.
+  const modelOptions = modelGroups.flatMap((g) => g.models.map((m) => ({ provider: g.provider, id: m.id })))
+  const initialModelChoice = modelChoiceFor(modelOptions, init.model, init.provider)
   const warnings = job ? jobWarnings(job) : []
   const text = (name: string, value: string, attrs = '') =>
     `<input ${attrs.includes('class=') ? '' : 'class="input"'} name="${name}" value="${esc(value)}" ${attrs} />`
@@ -101,13 +106,37 @@ export function renderJobForm(root: HTMLElement, job: Job | null, meta: MetaResp
         <div>
           <div class="mb-1 flex items-end justify-between gap-2">
             <label class="label mb-0" for="f-prompt">Prompt</label>
-            <button type="button" class="text-xs text-indigo-600 hover:underline dark:text-indigo-400" data-insert-silent>
-              Add [SILENT] rule</button>
+            <span class="flex gap-3">
+              <button type="button" class="text-xs text-indigo-600 hover:underline dark:text-indigo-400" data-insert-silent>
+                Add [SILENT] rule</button>
+              <button type="button" class="text-xs font-medium text-indigo-600 hover:underline dark:text-indigo-400" data-rewrite-start>
+                Suggest rewrite</button>
+            </span>
           </div>
           <textarea id="f-prompt" name="prompt" rows="14" class="input font-mono text-[13px] leading-relaxed"
             placeholder="Self-contained instructions: task, sources (with URLs), output format…">${esc(init.prompt)}</textarea>
           <p class="hint">Each run starts a fresh session with no chat memory, so include everything the job needs.
             The agent's final message is what gets delivered.</p>
+          <div data-rewrite hidden class="mt-3 space-y-3 rounded-md border border-indigo-200 bg-indigo-50/50 p-4 dark:border-indigo-900 dark:bg-indigo-950/30"></div>
+        </div>
+
+        <div>
+          <label class="label" for="f-model-choice">Model</label>
+          <select id="f-model-choice" class="input" data-model-choice>
+            <option value="">Follow default${meta.defaultModel ? ` (${esc(meta.defaultModel)})` : ''}</option>
+            ${(() => {
+              let i = 0
+              return modelGroups.map((g) => `<optgroup label="${esc(g.label)}">${g.models
+                .map((m) => `<option value="${i++}">${esc(m.label)}</option>`).join('')}</optgroup>`).join('')
+            })()}
+            <option value="custom">Custom…</option>
+          </select>
+          <div data-model-custom class="mt-2 grid gap-2 sm:grid-cols-2" hidden>
+            ${text('model', init.model, 'class="input font-mono" aria-label="Model id" placeholder="model id"')}
+            ${text('provider', init.provider, 'class="input font-mono" aria-label="Provider" placeholder="provider, e.g. custom:ollama-local"')}
+          </div>
+          <p class="hint">Unpinned jobs follow your default model, so they change whenever it does. Small models can
+            misbehave on cron jobs (for example, replying [SILENT] when they shouldn't).</p>
         </div>
       </section>
 
@@ -137,10 +166,6 @@ export function renderJobForm(root: HTMLElement, job: Job | null, meta: MetaResp
             <span class="label">Skills</span>
             <div data-field="skills"></div>
           </div>
-          <div><label class="label" for="f-model">Model</label>
-            ${text('model', init.model, 'id="f-model" placeholder="Follow default"')}</div>
-          <div><label class="label" for="f-provider">Provider</label>
-            ${text('provider', init.provider, 'id="f-provider" placeholder="e.g. openrouter"')}</div>
           <div><label class="label" for="f-reasoning">Reasoning effort</label>
             <select id="f-reasoning" name="reasoningEffort" class="input">
               ${REASONING.map((r) => `<option value="${r}" ${r === init.reasoningEffort ? 'selected' : ''}>${r || 'Follow config'}</option>`).join('')}
@@ -185,6 +210,67 @@ export function renderJobForm(root: HTMLElement, job: Job | null, meta: MetaResp
   const skills = new TokenField($('[data-field="skills"]', root), init.skills,
     [{ label: 'Installed skills', options: meta.skills.map((s) => ({ value: s, label: s })) }],
     { customPlaceholder: 'skill-name', emptyText: 'No skills attached', onChange })
+
+  const modelChoice = $<HTMLSelectElement>('[data-model-choice]', form)
+  const modelCustom = $('[data-model-custom]', form)
+  const modelInput = $<HTMLInputElement>('[name="model"]', form)
+  const providerInput = $<HTMLInputElement>('[name="provider"]', form)
+  modelChoice.value = initialModelChoice
+  modelCustom.hidden = initialModelChoice !== 'custom'
+  modelChoice.addEventListener('change', () => {
+    const v = modelChoice.value
+    modelCustom.hidden = v !== 'custom'
+    if (v === 'custom') {
+      modelInput.focus()
+    } else {
+      const o = v ? modelOptions[Number(v)] : null
+      modelInput.value = o?.id ?? ''
+      providerInput.value = o?.provider ?? ''
+    }
+    updateDirty()
+  })
+
+  // --- Rewrite helper: suggest, let the user edit, replace the prompt only on approval.
+  const promptInput = $<HTMLTextAreaElement>('[name="prompt"]', form)
+  const rewriteBox = $('[data-rewrite]', root)
+  let rewriteAbort: AbortController | null = null
+
+  function closeRewrite() {
+    rewriteAbort?.abort()
+    rewriteAbort = null
+    rewriteBox.hidden = true
+    rewriteBox.innerHTML = ''
+  }
+
+  async function startRewrite() {
+    rewriteAbort?.abort()
+    const abort = (rewriteAbort = new AbortController())
+    rewriteBox.hidden = false
+    rewriteBox.innerHTML = `
+      <div class="flex items-center gap-3 text-sm">
+        <span class="inline-block size-4 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent"></span>
+        <span>Asking the rewrite model… local models can take a minute.</span>
+        <button type="button" class="btn ml-auto" data-rewrite-discard>Cancel</button>
+      </div>
+      <p class="hint">Change which model does this in <a class="underline" href="#/settings">Settings</a>.</p>`
+    const now = current()
+    try {
+      const result = await api.rewrite({
+        prompt: promptInput.value, name: now.name, schedule: now.schedule, deliver: now.deliver,
+        continuity: now.continuity, model: now.model || meta.defaultModel || undefined,
+      }, abort.signal)
+      if (abort.signal.aborted) return
+      rewriteBox.innerHTML = rewritePanel(result)
+    } catch (err) {
+      if (abort.signal.aborted) return
+      rewriteBox.innerHTML = `
+        <p class="error-box">${esc(err instanceof Error ? err.message : err)}</p>
+        <div class="flex gap-2">
+          <button type="button" class="btn" data-rewrite-start>Try again</button>
+          <button type="button" class="btn" data-rewrite-discard>Close</button>
+        </div>`
+    }
+  }
 
   const scheduleInput = $<HTMLInputElement>('[name="schedule"]', form)
   const scheduleHint = $('[data-schedule-hint]', root)
@@ -246,10 +332,21 @@ export function renderJobForm(root: HTMLElement, job: Job | null, meta: MetaResp
       updateScheduleHint()
       updateDirty()
     } else if (t.closest('[data-insert-silent]')) {
-      const ta = $<HTMLTextAreaElement>('[name="prompt"]', form)
-      if (!ta.value.includes('[SILENT]')) ta.value = `${ta.value.trimEnd()}\n\n${SILENT_RULE}`.trimStart()
+      if (!promptInput.value.includes('[SILENT]')) {
+        promptInput.value = `${promptInput.value.trimEnd()}\n\n${SILENT_RULE}`.trimStart()
+      }
       updateDirty()
+    } else if (t.closest('[data-rewrite-start]')) {
+      startRewrite()
+    } else if (t.closest('[data-rewrite-use]')) {
+      promptInput.value = $<HTMLTextAreaElement>('[data-rewrite-text]', rewriteBox).value
+      closeRewrite()
+      promptInput.focus()
+      updateDirty()
+    } else if (t.closest('[data-rewrite-discard]')) {
+      closeRewrite()
     } else if (t.closest('[data-cancel]')) {
+      closeRewrite()
       cb.onCancel()
     }
   })
@@ -290,7 +387,34 @@ export function renderJobForm(root: HTMLElement, job: Job | null, meta: MetaResp
   })
 }
 
+/** Which picker option matches a job's pinned model: '' = default, an index, or 'custom'. */
+function modelChoiceFor(options: { provider: string; id: string }[], model: string, provider: string): string {
+  if (!model) return ''
+  let i = options.findIndex((o) => o.id === model && o.provider === provider)
+  if (i < 0 && !provider) i = options.findIndex((o) => o.id === model)
+  return i < 0 ? 'custom' : String(i)
+}
+
+function rewritePanel(r: RewriteResult): string {
+  return `
+    <div class="flex flex-wrap items-baseline justify-between gap-2">
+      <h4 class="text-sm font-semibold">Suggested rewrite</h4>
+      <span class="text-xs text-stone-500">${esc(r.model)} · ${(r.ms / 1000).toFixed(0)}s</span>
+    </div>
+    <textarea data-rewrite-text rows="12" class="input font-mono text-[13px] leading-relaxed"
+      aria-label="Suggested prompt (editable)">${esc(r.prompt)}</textarea>
+    ${r.notes.length ? `<ul class="list-disc space-y-0.5 pl-5 text-xs text-stone-600 dark:text-stone-400">${
+      r.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
+    <div class="flex flex-wrap items-center gap-2">
+      <button type="button" class="btn btn-primary" data-rewrite-use>Use this version</button>
+      <button type="button" class="btn" data-rewrite-start>Try again</button>
+      <button type="button" class="btn" data-rewrite-discard>Discard</button>
+    </div>
+    <p class="hint">Edit it here if you like. Your prompt only changes when you choose "Use this version",
+      and the job isn't updated until you save.</p>`
+}
+
 function hasAdvanced(v: ReturnType<typeof initialValues>): boolean {
-  return Boolean(v.skills.length || v.model || v.provider || v.reasoningEffort || v.repeat || v.workdir
+  return Boolean(v.skills.length || v.reasoningEffort || v.repeat || v.workdir
     || v.script || v.noAgent || v.monitorScript || v.monitorUrl)
 }

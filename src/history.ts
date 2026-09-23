@@ -26,14 +26,20 @@ export async function renderRuns(root: HTMLElement, jobId: string) {
   }
   // A job can look healthy from manual runs yet never have completed a scheduled one.
   const scheduledOk = runs.some((r) => r.source === 'builtin' && r.status === 'completed')
+  // A model can "succeed" by replying [SILENT] to a task that should always produce output.
+  const latest = runs.find((r) => r.status === 'completed')
+  const notes = [
+    scheduledOk ? '' : 'No scheduled run in this history has completed. Only manual runs have succeeded, or none have.',
+    latest?.silent ? `The latest completed run replied [SILENT], so nothing was delivered${latest.model ? ` (model: ${latest.model})` : ''}. If this job should always produce output, small models can over-use [SILENT]: pin a stronger model or tell the prompt never to reply [SILENT].` : '',
+  ].filter(Boolean)
   root.innerHTML = `
-    ${scheduledOk ? '' : '<p class="warn mb-4">No scheduled run in this history has completed. Only manual runs have succeeded, or none have.</p>'}
+    ${notes.map((n) => `<p class="warn mb-4">${esc(n)}</p>`).join('')}
     <div class="overflow-x-auto">
       <table class="w-full text-left text-sm">
         <thead class="text-xs text-stone-500 uppercase">
           <tr><th class="py-2 pr-4 font-medium">Status</th><th class="py-2 pr-4 font-medium">Trigger</th>
             <th class="py-2 pr-4 font-medium">Started</th><th class="py-2 pr-4 font-medium">Duration</th>
-            <th class="py-2 font-medium">Delivery</th></tr>
+            <th class="py-2 pr-4 font-medium">Model</th><th class="py-2 font-medium">Delivery</th></tr>
         </thead>
         <tbody class="divide-y divide-stone-200 dark:divide-stone-800">
           ${runs.map((r) => `
@@ -42,9 +48,12 @@ export async function renderRuns(root: HTMLElement, jobId: string) {
               <td class="py-2 pr-4">${r.source === 'builtin' ? 'Scheduled' : r.source === 'direct' ? 'Manual' : esc(r.source)}</td>
               <td class="py-2 pr-4 whitespace-nowrap" title="${esc(r.claimed_at)}">${esc(fmtDate(r.started_at ?? r.claimed_at))}</td>
               <td class="py-2 pr-4">${duration(r)}</td>
-              <td class="py-2">${esc(r.delivery_outcome ?? '—')}</td>
+              <td class="py-2 pr-4 font-mono text-xs" title="${r.tokens ? `${r.tokens} tokens` : ''}">${esc(r.model ?? '—')}</td>
+              <td class="py-2">${r.silent
+                ? '<span class="badge bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200" title="The agent replied [SILENT]">silent, nothing sent</span>'
+                : esc(r.delivery_outcome ?? '—')}</td>
             </tr>
-            ${r.error ? `<tr><td colspan="5" class="pb-3"><pre class="error-box overflow-x-auto text-xs whitespace-pre-wrap">${esc(r.error)}</pre></td></tr>` : ''}`).join('')}
+            ${r.error ? `<tr><td colspan="6" class="pb-3"><pre class="error-box overflow-x-auto text-xs whitespace-pre-wrap">${esc(r.error)}</pre></td></tr>` : ''}`).join('')}
         </tbody>
       </table>
     </div>`
