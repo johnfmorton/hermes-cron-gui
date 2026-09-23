@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - "Run now" no longer kills runs that take longer than 60 seconds. `hermes cron run` executes the whole job synchronously, so it now starts as a detached background process that survives page navigation and dev-server restarts.
 - A run whose process died no longer shows as "running" forever; the badge follows Hermes's own rule (claim under 5 minutes old and owner process alive).
 - The "Run now" tooltip no longer says the run waits for the next scheduler tick.
+- The model picker no longer lists a provider after its credentials are removed with `hermes auth remove`, which leaves an empty entry in `auth.json`. Copilot models kept showing up this way and then failed with "The requested model is not supported."
+- The model picker now lists Anthropic when Hermes signs in with Claude Code's login (`~/.claude/.credentials.json`) instead of an API key.
 
 ## [0.0.1] - 2026-09-23
 

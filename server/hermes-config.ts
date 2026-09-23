@@ -1,7 +1,7 @@
 // Read-only helpers for Hermes's own config: which models and providers are available,
 // and what an unpinned job falls back to. Nothing here writes to ~/.hermes.
 
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { parse as parseYaml } from 'yaml'
@@ -78,7 +78,7 @@ const PROVIDER_LABELS: Record<string, string> = {
 /**
  * Models a job can be pinned to, grouped by the provider id Hermes expects in `--provider`.
  * Local providers come first; cloud providers are listed only when Hermes has credentials
- * for them (OAuth pool / auth.json, or an API key in ~/.hermes/.env).
+ * for them (OAuth pool / auth.json, an API key in ~/.hermes/.env, or Claude Code's login).
  */
 export async function listModelGroups(): Promise<ModelGroup[]> {
   const cfg = await readHermesConfig()
@@ -101,10 +101,14 @@ export async function listModelGroups(): Promise<ModelGroup[]> {
     if (models.length) groups.push({ provider, label: p.name ?? key, models })
   }
 
-  const auth = await readJson<{ providers?: Record<string, unknown>; credential_pool?: Record<string, unknown> }>('auth.json')
-  const signedIn = new Set([...Object.keys(auth?.providers ?? {}), ...Object.keys(auth?.credential_pool ?? {})])
+  const auth = await readJson<{ providers?: Record<string, unknown>; credential_pool?: Record<string, unknown[]> }>('auth.json')
+  // `hermes auth remove` leaves an empty pool entry behind, so only count pools that hold a credential.
+  const pooled = Object.entries(auth?.credential_pool ?? {}).filter(([, creds]) => Array.isArray(creds) && creds.length).map(([p]) => p)
+  const signedIn = new Set([...Object.keys(auth?.providers ?? {}), ...pooled])
   const env = await envKeysPresent()
   for (const [provider, names] of Object.entries(ENV_KEYS)) if (names.some((n) => env.has(n))) signedIn.add(provider)
+  // With no key of its own, Hermes borrows Claude Code's login for Anthropic.
+  if (await stat(path.join(os.homedir(), '.claude', '.credentials.json')).then((s) => s.size > 2, () => false)) signedIn.add('anthropic')
 
   const cache = await readJson<Record<string, { models?: string[] }>>('provider_models_cache.json') ?? {}
   for (const [provider, entry] of Object.entries(cache)) {
