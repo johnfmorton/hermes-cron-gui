@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hermes Cron</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Ccircle cx=%228%22 cy=%228%22 r=%227%22 fill=%22%234f46e5%22/%3E%3Cpath d=%22M8 4v4l3 2%22 stroke=%22white%22 stroke-width=%221.6%22 fill=%22none%22 stroke-linecap=%22round%22/%3E%3C/svg%3E" />
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body class="h-dvh bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
+    <div class="grid h-full grid-rows-[auto_1fr]">
+      <header class="flex items-center gap-4 border-b border-stone-200 px-5 py-3 dark:border-stone-800">
+        <h1 class="text-base font-semibold tracking-tight">Hermes Cron</h1>
+        <span id="scheduler-status" class="text-xs text-stone-500"></span>
+        <button type="button" data-action="new" class="btn btn-primary ml-auto">New job</button>
+      </header>
+
+      <div class="grid min-h-0 grid-cols-[20rem_1fr] max-md:grid-cols-1">
+        <aside class="min-h-0 overflow-y-auto border-r border-stone-200 dark:border-stone-800 max-md:border-r-0 max-md:border-b">
+          <ul id="job-list" class="divide-y divide-stone-200 dark:divide-stone-800"></ul>
+        </aside>
+        <main id="detail" class="min-h-0 overflow-y-auto"></main>
+      </div>
+    </div>
+    <div id="toast" class="toast" hidden></div>
+  </body>
+</html>
