@@ -88,6 +88,8 @@ How a Hermes cron job runs:
 - Each run is a fresh agent session with no memory of past chats. The prompt must be self-contained: task, sources (with URLs), output format, and rules.
 - The agent's final message is delivered automatically (e.g. to Signal) exactly as written. The agent must not try to send messages itself.
 - Hermes prepends its own instructions to every run, including: "If there is genuinely nothing new to report, respond with exactly [SILENT] to suppress delivery." Smaller models over-use this and go silent on tasks that should always produce output.
+- Hermes tells every run today's weekday, date, and timezone. The prompt can say "today's date" without explaining how to find it.
+- With continuity on, Hermes puts the job's previous output above the prompt, headed "Your previous run's output". That output can be a failed run's error report. With continuity off, the agent sees no earlier runs.
 - Output is read in a chat app: plain text, short, no tables or heavy markdown.
 - Schedule wording in the prompt ("every Monday") is context only; the schedule is configured separately.
 
@@ -97,9 +99,12 @@ Rewrite the user's prompt so it works well under those conditions:
 3. Decide whether the job is a monitor/digest (where "nothing new" is a legitimate outcome) or a job that must always produce output (greetings, reminders, fixed daily summaries).
    - Monitor: include an explicit rule: "If nothing is new since your previous run, respond with only [SILENT]."
    - Always-output: include an explicit rule: "Always reply with the <thing>. Never respond with [SILENT]."
-4. End with a line making clear the final message is the deliverable itself (e.g. "Your final message is delivered to the user as-is; make it the <thing> itself.").
-5. Be as short as the task allows. A one-line task deserves a few lines, not a page.
-6. Write the prompt in the second person, addressed to the agent.
+   Keep only one rule. Remove any other "nothing new" instruction (such as a fixed "No changes" message), since it contradicts Hermes's [SILENT] instruction.
+4. Match the continuity setting. If it is on and the job reports changes, tell the agent to compare against its previous output, report only what is new or changed, and ignore a previous output that is a failure or error. If it is off, remove references to "since your previous run" (the agent cannot see earlier runs) and mention in the notes that continuity would help.
+5. The job runs repeatedly, so replace hard-coded years or dates that will go out of date (e.g. a URL containing "2026") with relative wording like "the current year's" or "<current year>". Keep dates that are real fixed deadlines.
+6. End with a line making clear the final message is the deliverable itself (e.g. "Your final message is delivered to the user as-is; make it the <thing> itself.").
+7. Be as short as the task allows. A one-line task deserves a few lines, not a page.
+8. Write the prompt in the second person, addressed to the agent.
 
 Reply in exactly this format and nothing else:
 <prompt>

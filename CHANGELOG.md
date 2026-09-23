@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Rewrote the README: a feature list, requirements, how "Run now" works, the current rules for which providers the model picker lists, a troubleshooting section (including "The requested model is not supported"), and links to the cheat sheet, changelog, and license.
+- "Suggest rewrite" writes prompts that fit how Hermes actually runs jobs:
+  - It keeps a single "nothing new" rule and removes lines like a fixed "No changes" message that contradict Hermes's built-in `[SILENT]` instruction.
+  - It follows the job's continuity setting. With continuity on, the agent compares against its previous output and ignores a previous run that failed. With continuity off, the rewrite drops "since your previous run" wording.
+  - It replaces hard-coded years that will go out of date, such as a `2026` in a URL, with relative wording.
+  - It no longer adds instructions for finding the date, because Hermes already gives every run the date.
 
 ## [0.1.0] - 2026-09-23
 
